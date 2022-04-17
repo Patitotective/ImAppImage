@@ -1,25 +1,20 @@
-import std/[strutils, sequtils, browsers, os]
+import std/[asyncdispatch, strutils, sequtils, browsers, json, os]
 
+import puppy
 import imstyle
 import niprefs
 import nimgl/[opengl, glfw]
 import nimgl/imgui, nimgl/imgui/[impl_opengl, impl_glfw]
 
-import src/[utils, prefsmodal, icons]
+import src/[prefsmodal, utils, icons]
 
 const
-  resourcesDir = "data"
+  resourcesDir = "resources"
   configPath = "config.niprefs"
 
-proc getPath(path: string): string = 
-  # When running on an AppImage get the path from the AppImage resources
-  when defined(appImage):
-    result = getEnv"APPDIR" / resourcesDir / path.extractFilename()
-  else:
-    result = getAppDir() / path
-
-proc getPath(path: PrefsNode): string = 
-  path.getString().getPath()
+var
+  donwloadChannel: Channel[(BiggestInt, BiggestInt, BiggestInt)]
+  dataChannel: Channel[tuple[msg: string, node: JsonNode]] # In case of an exception, returns the error message and JNull
 
 proc drawAboutModal(app: var App) = 
   var center: ImVec2
@@ -56,10 +51,10 @@ proc drawAboutModal(app: var App) =
 
     igEndPopup()
 
-proc drawMenuBar(app: var App) =
+proc drawMainMenuBar(app: var App) =
   var openAbout, openPrefs = false
 
-  if igBeginMenuBar():
+  if igBeginMainMenuBar():
     if igBeginMenu("File"):
       igMenuItem("Preferences " & FA_Cog, "Ctrl+P", openPrefs.addr)
       if igMenuItem("Quit " & FA_Times, "Ctrl+Q"):
@@ -67,8 +62,6 @@ proc drawMenuBar(app: var App) =
       igEndMenu()
 
     if igBeginMenu("Edit"):
-      if igMenuItem("Reset Counter " & FA_Refresh, "Ctrl+R"):
-        app.counter = 0
       if igMenuItem("Paste " & FA_Clipboard, "Ctrl+V"):
         echo "paste"
 
@@ -82,7 +75,7 @@ proc drawMenuBar(app: var App) =
 
       igEndMenu() 
 
-    igEndMenuBar()
+    igEndMainMenuBar()
 
   # See https://github.com/ocornut/imgui/issues/331#issuecomment-751372071
   if openPrefs:
@@ -94,27 +87,84 @@ proc drawMenuBar(app: var App) =
   app.drawAboutModal()
   app.drawPrefsModal()
 
+proc onProgress(total, progress, speed: BiggestInt) {.async, nimcall, thread.} = 
+  donwloadChannel.send((total, progress, speed))
+
+proc fetchdata() = 
+  try:
+    dataChannel.send(("", fetch("https://appimage.github.io/feed.json").parseJson()))
+  except PuppyError:
+    dataChannel.send((getCurrentExceptionMsg(), newJNull()))
+
 proc drawMain(app: var App) = # Draw the main window
   let viewport = igGetMainViewport()
   igSetNextWindowPos(viewport.pos)
-  igSetNextWindowSize(viewport.size)
+  igSetNextWindowSize(igVec2(viewport.size.x, viewport.size.y - igGetFrameHeight()))
 
-  igBegin(app.config["name"].getString(), flags = makeFlags(ImGuiWindowFlags.NoResize, ImGuiWindowFlags.NoSavedSettings, NoMove, NoDecoration, MenuBar))
+  app.drawMainMenuBar()
 
-  app.drawMenuBar()
+  # Finished fetching data
+  if app.data.kind == JNull and not app.dataThread.running: 
+    let data = dataChannel.recv()
+    
+    if data.node.kind == JNull: # Failed
+      app.statusMsg = "Couldn't fetch data. Trying to fetch data locally"
+      if app.prefs["data"].getString().len == 0:
+        app.statusMsg = "Couldn't fetch data locally. Please try again later."
+      else:
+        app.statusMsg = "Successfully fetched data locally"  
+        app.data = app.prefs["data"].getString().parseJson()
+    else:
+      app.data = data.node
+      app.statusMsg = "Successfully fetched data"
 
-  igText("Hello World " & FA_User)
 
-  igSliderFloat("float", app.somefloat.addr, 0.0f, 1.0f)
+  if igBegin(app.config["name"].getString(), flags = makeFlags(ImGuiWindowFlags.NoResize, NoMove, NoDecoration)):
+    #[
+      if igButton("Check data " & FA_CloudDownload):
+        if "data.zip".fileExists():
+          app.statusMsg = "Uncompressing data"
+          app.unzipData()  
+        elif not app.config["dataDir"].getPath().dirExists():
+          app.statusMsg = "Downloading data"
+          donwloadChannel.open()
+          app.downloadThread.createThread(downloadData, onProgress)
+        else:
+          app.statusMsg = "Data already downloaded"
 
-  if igButton("Button " & FA_HandPointerO):
-    inc app.counter
-  igSameLine()
-  igText("counter = %d", app.counter)
+      if app.downloadThread.running:
+        igSameLine()
+        if igButton("Cancel"):
+          echo "cancel..."
 
-  igText(FA_Info & " Application average %.3f ms/frame (%.1f FPS)", 1000.0f / igGetIO().framerate, igGetIO().framerate)
+        app.downloadFinished = true
+        let (hasData, newState) = donwloadChannel.tryRecv()
+        if hasData:
+          app.downloadState = newState
 
-  igEnd()
+        igText("Downloaded " & $(app.downloadState[1] div 1_000_000) & " of " & $(app.downloadState[0] div 1_000_000) & "MB " & $(app.downloadState[2] div 1000) & "KB/s")
+
+      if app.downloadFinished and not app.downloadThread.running:
+        app.statusMsg = "Uncompressing data"
+        app.downloadFinished = false
+        donwloadChannel.close()
+        app.unzipData()
+    ]#
+  
+    if app.dataThread.running:
+      igSpinner("##spinner", 15, 6, igGetColorU32(ButtonHovered))
+
+    igEnd()
+
+  # Status Bar
+  igSetNextWindowPos(igVec2(viewport.pos.x, viewport.pos.y + viewport.size.y - igGetFrameHeight()))
+  igSetNextWindowSize(igVec2(viewport.size.x, igGetFrameHeight()))
+
+  if igBegin("Status Bar", flags = makeFlags(ImGuiWindowFlags.NoInputs, NoDecoration, NoMove, NoScrollWithMouse, NoBringToFrontOnFocus, NoBackground, MenuBar)):
+    if igBeginMenuBar():
+      igText(app.statusMsg)
+      igEndMenuBar()
+    igEnd()
 
 proc display(app: var App) = # Called in the main loop
   glfwPollEvents()
@@ -167,6 +217,7 @@ proc initPrefs(app: var App) =
     let prefsPath = getAppDir() / app.config["prefsPath"].getString()
   
   app.prefs = toPrefs({
+    data: "",
     win: {
       x: 0,
       y: 0,
@@ -185,11 +236,19 @@ proc initconfig*(app: var App, settings: PrefsNode) =
       app.prefs[name] = data["default"]
 
 proc initApp*(config: PObjectType): App = 
-  result = App(config: config, somefloat: 0.5f, counter: 2)
+  result = App(config: config, data: newJNull())
   result.initPrefs()
   result.initConfig(result.config["settings"])
 
+  # Fetch data
+  result.statusMsg = "Fetching data..."
+  result.dataThread.createThread(fetchData)
+  dataChannel.open()
+
 proc terminate(app: var App) = 
+  if app.data.kind != JNull:
+    app.prefs["data"] = $app.data
+
   var x, y, width, height: int32
 
   app.win.getWindowPos(x.addr, y.addr)
@@ -206,15 +265,14 @@ proc main() =
   var app = initApp(configPath.getPath().readPrefs())
 
   doAssert glfwInit()
-
   app.initWindow()
-
   doAssert glInit()
 
   let context = igCreateContext()
   let io = igGetIO()
   io.iniFilename = nil # Disable ini file
 
+  # Load fonts
   app.font = io.fonts.addFontFromFileTTF(app.config["fontPath"].getPath(), app.config["fontSize"].getFloat())
 
   # Add ForkAwesome icon font
@@ -225,7 +283,8 @@ proc main() =
   doAssert igGlfwInitForOpenGL(app.win, true)
   doAssert igOpenGL3Init()
 
-  setIgStyle(app.config["stylePath"].getPath()) # Load application style
+  # Load application style
+  setIgStyle(app.config["stylePath"].getPath())
 
   while not app.win.windowShouldClose:
     app.display()
@@ -236,7 +295,7 @@ proc main() =
   context.igDestroyContext()
 
   app.terminate()
-  
+
   glfwTerminate()
 
 when isMainModule:

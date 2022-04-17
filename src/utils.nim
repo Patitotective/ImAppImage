@@ -1,11 +1,12 @@
-import std/[strutils, strformat, enumutils, macros, typetraits]
+import std/[asyncdispatch, httpclient, typetraits, strutils, 
+  strformat, enumutils, macros, math, json, os]
 
 import chroma
 import niprefs
 import stb_image/read as stbi
 import nimgl/[imgui, glfw, opengl]
 
-export enumutils
+export enumutils, niprefs
 
 type
   App* = ref object
@@ -15,9 +16,14 @@ type
     config*: PObjectType # Prefs table
     cache*: PObjectType # Settings cache
 
-    # Variables
-    somefloat*: float32
-    counter*: int
+    data*: JsonNode # Data fetched from AppImageHub
+    statusMsg*: string
+
+    downloadFinished*: bool
+    downloadState*: (BiggestInt, BiggestInt, BiggestInt)
+    downloadThread*: Thread[ProgressChangedProc[Future[void]]]
+
+    dataThread*: Thread[void]
 
   SettingTypes* = enum
     Input # Input text
@@ -156,3 +162,50 @@ proc newImFontConfig*(mergeMode = false): ImFontConfig =
   result.glyphMaxAdvanceX = float.high
   result.rasterizerMultiply = 1.0
   result.mergeMode = mergeMode
+
+proc getPath*(path: string): string = 
+  # When running on an AppImage get the path from the AppImage resources
+  when defined(appImage):
+    result = getEnv"APPDIR" / resourcesDir / path.extractFilename()
+  else:
+    result = getAppDir() / path
+
+proc getPath*(path: PrefsNode): string = 
+  path.getString().getPath()
+
+proc igSpinner*(label: string, radius: float, thickness: float32, color: uint32) = 
+  let window = igGetCurrentWindow()
+  if window.skipItems:
+    return
+  
+  let
+    context = igGetCurrentContext()
+    style = context.style
+    id = igGetID(label)
+  
+    pos = window.dc.cursorPos
+    size = ImVec2(x: radius * 2, y: (radius + style.framePadding.y) * 2)
+
+    bb = ImRect(min: pos, max: ImVec2(x: pos.x + size.x, y: pos.y + size.y));
+  igItemSize(bb, style.framePadding.y)
+
+  if not igItemAdd(bb, id):
+      return
+  
+  window.drawList.pathClear()
+  
+  let
+    numSegments = 30
+    start = abs(sin(context.time * 1.8f) * (numSegments - 5).float)
+  
+  let
+    aMin = PI * 2f * start / numSegments.float
+    aMax = PI * 2f * ((numSegments - 3) / numSegments).float
+
+    centre = ImVec2(x: pos.x + radius, y: pos.y + radius + style.framePadding.y)
+
+  for i in 0..<numSegments:
+    let a = aMin + i / numSegments * (aMax - aMin)
+    window.drawList.pathLineTo(ImVec2(x: centre.x + cos(a + context.time * 8) * radius, y: centre.y + sin(a + context.time * 8) * radius))
+
+  window.drawList.pathStroke(color, thickness = thickness)

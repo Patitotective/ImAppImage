@@ -24,7 +24,7 @@ proc checkFile(path: string) =
     discard existsOrCreateDir(dir)
 
 const
-  resourcesDir = "data"
+  resourcesDir = "resources"
   configPath = "config.niprefs"
   desktop = """
   [Desktop Entry]
