@@ -1,5 +1,4 @@
-import std/[asyncdispatch, httpclient, typetraits, strutils, 
-  strformat, enumutils, macros, math, json, os]
+import std/[typetraits, strutils, strformat, enumutils, macros, math, json, os]
 
 import chroma
 import niprefs
@@ -12,18 +11,17 @@ type
   App* = ref object
     win*: GLFWWindow
     font*: ptr ImFont
+    strongFont*: ptr ImFont
     prefs*: Prefs
     config*: PObjectType # Prefs table
     cache*: PObjectType # Settings cache
 
     data*: JsonNode # Data fetched from AppImageHub
     statusMsg*: string
-
-    downloadFinished*: bool
-    downloadState*: (BiggestInt, BiggestInt, BiggestInt)
-    downloadThread*: Thread[ProgressChangedProc[Future[void]]]
-
     dataThread*: Thread[void]
+
+    currentCategory*: int
+    currentApp*: int
 
   SettingTypes* = enum
     Input # Input text
@@ -120,6 +118,8 @@ proc igVec2*(x, y: float32): ImVec2 = ImVec2(x: x, y: y)
 
 proc igVec4*(x, y, z, w: float32): ImVec4 = ImVec4(x: x, y: y, z: z, w: w)
 
+proc igVec4*(color: Color): ImVec4 = ImVec4(x: color.r, y: color.g, z: color.b, w: color.a)
+
 proc initGLFWImage*(data: ImageData): GLFWImage = 
   result = GLFWImage(pixels: cast[ptr cuchar](data.image[0].unsafeAddr), width: int32 data.width, height: int32 data.height)
 
@@ -209,3 +209,70 @@ proc igSpinner*(label: string, radius: float, thickness: float32, color: uint32)
     window.drawList.pathLineTo(ImVec2(x: centre.x + cos(a + context.time * 8) * radius, y: centre.y + sin(a + context.time * 8) * radius))
 
   window.drawList.pathStroke(color, thickness = thickness)
+
+proc igHSV*(h, s, v: float32, a: float32 = 1f): ImColor = 
+  result.addr.hSVNonUDT(h, s, v, a)
+
+proc igCalcTextSize*(text: cstring, text_end: cstring = nil, hide_text_after_double_hash: bool = false, wrap_width: float32 = -1.0'f32): ImVec2 = 
+  igCalcTextSizeNonUDT(result.addr, text, text_end, hide_text_after_double_hash, wrap_width)
+
+proc igGetContentRegionAvail*(): ImVec2 = 
+  igGetContentRegionAvailNonUDT(result.addr)
+
+proc igGetWindowContentRegionMax*(): ImVec2 = 
+  igGetWindowContentRegionMaxNonUDT(result.addr)
+
+proc igGetItemRectMin*(): ImVec2 = 
+  igGetItemRectMinNonUDT(result.addr)
+
+proc igGetItemRectMax*(): ImVec2 = 
+  igGetItemRectMaxNonUDT(result.addr)
+
+proc igGetWindowPos*(): ImVec2 = 
+  igGetWindowPosNonUDT(result.addr)
+
+proc igCenterCursorX*(width: float32, align: float = 0.5f) = 
+  var avail: ImVec2
+
+  igGetContentRegionAvailNonUDT(avail.addr)
+  
+  let off = (avail.x - width) * align
+  
+  if off > 0:
+    igSetCursorPosX(igGetCursorPosX() + off)
+
+proc igCenterCursorY*(height: float32, align: float = 0.5f) = 
+  var avail: ImVec2
+
+  igGetContentRegionAvailNonUDT(avail.addr)
+  
+  let off = (avail.y - height) * align
+  
+  if off > 0:
+    igSetCursorPosY(igGetCursorPosY() + off)
+
+proc igCenterCursor*(size: ImVec2, alignX: float = 0.5f, alignY: float = 0.5f) = 
+  igCenterCursorX(size.x, alignX)
+  igCenterCursorY(size.y, alignY)
+
+proc `+`*(vec1, vec2: ImVec2): ImVec2 = 
+  igVec2(vec1.x + vec2.x, vec1.y + vec2.y)
+
+proc `+`*(vec: ImVec2, val: float32): ImVec2 = 
+  igVec2(vec.x + val, vec.y + val)
+
+proc `-`*(vec1, vec2: ImVec2): ImVec2 = 
+  igVec2(vec1.x - vec2.x, vec1.y - vec2.y)
+
+proc `-`*(vec: ImVec2, val: float32): ImVec2 = 
+  igVec2(vec.x - val, vec.y - val)
+
+proc removeInside*(s: string, open, close: char): string = 
+  var inside = false
+  for i in s:
+    if i == open: inside = true
+    if not inside: result.add i
+    if i == close: inside = false
+
+proc igGetCursorPos*(): ImVec2 = 
+  igGetCursorPosNonUDT(result.addr)

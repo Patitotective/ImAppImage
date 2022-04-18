@@ -11,13 +11,12 @@ stylePath="assets/style.niprefs"
 iconPath="assets/icon.png"
 svgIconPath="assets/icon.svg"
 iconFontPath="assets/forkawesome-webfont.ttf"
-fontPath="assets/ProggyVector Regular.ttf" # Other options are Roboto-Regular.ttf, Cousine-Regular.ttf or Karla-Regular.ttf
+fontPath="assets/Karla-Regular.ttf" # Other options are Roboto-Regular.ttf, Cousine-Regular.ttf or Karla-Regular.ttf
+strongFontPath="assets/Karla-Bold.ttf"
 fontSize=16f
 
-dataDir="data" # AppImage(Hub) data
-
 # Window
-minSize=[200, 200] # Width, height
+minSize=[450, 300] # Width, height
 
 # Settings for the preferences window
 settings=>

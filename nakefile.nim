@@ -3,6 +3,33 @@ import std/[strformat, strutils, sequtils, os]
 import nake
 import niprefs
 
+const
+  resourcesDir = "data"
+  configPath = "config.niprefs"
+  desktop = """
+  [Desktop Entry]
+  Name=$name
+  Exec=AppRun
+  Comment=$comment
+  Icon=$name
+  Type=Application
+  Categories=$categories
+
+  X-AppImage-Name=$name
+  X-AppImage-Version=$version
+  """.dedent()
+
+let
+  config = configPath.readPrefs()
+  resources = [
+    configPath, 
+    config["iconPath"].getString(), 
+    config["stylePath"].getString(), 
+    config["iconFontPath"].getString(),
+    config["fontPath"].getString()
+  ]
+  name = config["name"].getString() 
+
 proc checkPath(path: string) = 
   ## Iterate through `path.parentDirs` from the root creating all the directories that do not exist.
   ## **Example:**
@@ -22,32 +49,6 @@ proc checkFile(path: string) =
   ## ```
   for dir in path.parentDir.parentDirs(fromRoot=true):
     discard existsOrCreateDir(dir)
-
-const
-  resourcesDir = "resources"
-  configPath = "config.niprefs"
-  desktop = """
-  [Desktop Entry]
-  Name=$name
-  Exec=AppRun
-  Comment=$comment
-  Icon=$name
-  Type=Application
-  Categories=$categories
-
-  X-AppImage-Name=$name
-  X-AppImage-Version=$version
-  """.dedent()
-let
-  config = configPath.readPrefs()
-  resources = [
-    configPath, 
-    config["iconPath"].getString(), 
-    config["stylePath"].getString(), 
-    config["iconFontPath"].getString(),
-    config["fontPath"].getString()
-  ]
-  name = config["name"].getString() 
 
 task "build", "Build AppImage application":
   shell "nimble install -d -y"
