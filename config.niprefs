@@ -2,7 +2,7 @@
 name="ImAppImage"
 comment="ImAppImage is a simple Dear ImGui application to install and manage AppImages"
 version="0.1.0"
-website="https://github.com/Patitotective/ImTemplate"
+website="https://github.com/Patitotective/ImAppImage"
 authors=["Patitotective", "Cristobal", "Inu147"]
 categories=["Utility"]
 

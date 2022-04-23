@@ -1,3 +1,6 @@
+<!---
+NOTES
+-->
 # <img title="Icon" width=50 height=50 src="https://github.com/Patitotective/ImTemplate/blob/main/assets/icon.svg"></img> ImTemplate
 Template for making a single-windowed (or not) Dear ImGui application in Nim.
 

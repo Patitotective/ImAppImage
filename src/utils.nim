@@ -1,27 +1,16 @@
-import std/[typetraits, strutils, strformat, enumutils, macros, math, json, os]
+import std/[typetraits, strutils, strformat, enumutils, browsers, macros, options, math, os]
 
 import chroma
 import niprefs
 import stb_image/read as stbi
 import nimgl/[imgui, glfw, opengl]
 
+import icons, feed
+
 export enumutils, niprefs
 
 type
-  App* = ref object
-    win*: GLFWWindow
-    font*: ptr ImFont
-    strongFont*: ptr ImFont
-    prefs*: Prefs
-    config*: PObjectType # Prefs table
-    cache*: PObjectType # Settings cache
-
-    data*: JsonNode # Data fetched from AppImageHub
-    statusMsg*: string
-    dataThread*: Thread[void]
-
-    currentCategory*: int
-    currentApp*: int
+  ImageData* = tuple[pixels: seq[byte], width, height: int]
 
   SettingTypes* = enum
     Input # Input text
@@ -36,7 +25,24 @@ type
     Color4 # Color edit RGBA
     Section
 
-  ImageData* = tuple[image: seq[byte], width, height: int]
+  App* = ref object
+    win*: GLFWWindow
+    font*: ptr ImFont
+    strongFont*: ptr ImFont
+    prefs*: Prefs
+    config*: PObjectType # Prefs table
+    cache*: PObjectType # Settings cache
+
+    imgTable*: Table[string, ImageData]
+
+    feed*: Option[Feed] # Data fetched from AppImageHub
+    statusMsg*: string
+    dataThread*: Thread[void]
+
+    currentCategory*: int
+    currentApp*: int
+    searchBuf*: string
+
 
 # To be able to print large holey enums
 macro enumFullRange*(a: typed): untyped =
@@ -121,11 +127,15 @@ proc igVec4*(x, y, z, w: float32): ImVec4 = ImVec4(x: x, y: y, z: z, w: w)
 proc igVec4*(color: Color): ImVec4 = ImVec4(x: color.r, y: color.g, z: color.b, w: color.a)
 
 proc initGLFWImage*(data: ImageData): GLFWImage = 
-  result = GLFWImage(pixels: cast[ptr cuchar](data.image[0].unsafeAddr), width: int32 data.width, height: int32 data.height)
+  result = GLFWImage(pixels: cast[ptr cuchar](data.pixels[0].unsafeAddr), width: int32 data.width, height: int32 data.height)
 
 proc readImage*(path: string): ImageData = 
   var channels: int
-  result.image = stbi.load(path, result.width, result.height, channels, stbi.Default)
+  try:
+    result.pixels = stbi.load(path, result.width, result.height, channels, stbi.Default)
+  except Exception as error:
+    error.msg = getCurrentExceptionMsg() & " in " & path
+    raise
 
 proc loadTextureFromData*(data: var ImageData, outTexture: var GLuint) =
     # Create a OpenGL texture identifier
@@ -142,7 +152,7 @@ proc loadTextureFromData*(data: var ImageData, outTexture: var GLuint) =
     # if defined(GL_UNPACK_ROW_LENGTH) && !defined(__EMSCRIPTEN__)
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0)
 
-    glTexImage2D(GL_TEXTURE_2D, GLint 0, GL_RGBA.GLint, GLsizei data.width, GLsizei data.height, GLint 0, GL_RGBA, GL_UNSIGNED_BYTE, data.image[0].addr)
+    glTexImage2D(GL_TEXTURE_2D, GLint 0, GL_RGBA.GLint, GLsizei data.width, GLsizei data.height, GLint 0, GL_RGBA, GL_UNSIGNED_BYTE, data.pixels[0].addr)
 
 proc igHelpMarker*(text: string) = 
   igTextDisabled("(?)")
@@ -228,25 +238,23 @@ proc igGetItemRectMin*(): ImVec2 =
 proc igGetItemRectMax*(): ImVec2 = 
   igGetItemRectMaxNonUDT(result.addr)
 
+proc igGetItemRectSize*(): ImVec2 = 
+  igGetItemRectSizeNonUDT(result.addr)
+
 proc igGetWindowPos*(): ImVec2 = 
   igGetWindowPosNonUDT(result.addr)
 
-proc igCenterCursorX*(width: float32, align: float = 0.5f) = 
-  var avail: ImVec2
+proc igGetCursorPos*(): ImVec2 = 
+  igGetCursorPosNonUDT(result.addr)
 
-  igGetContentRegionAvailNonUDT(avail.addr)
-  
-  let off = (avail.x - width) * align
+proc igCenterCursorX*(width: float32, align: float = 0.5f) = 
+  let off = (igGetContentRegionAvail().x - width) * align
   
   if off > 0:
     igSetCursorPosX(igGetCursorPosX() + off)
 
 proc igCenterCursorY*(height: float32, align: float = 0.5f) = 
-  var avail: ImVec2
-
-  igGetContentRegionAvailNonUDT(avail.addr)
-  
-  let off = (avail.y - height) * align
+  let off = (igGetContentRegionAvail().y - height) * align
   
   if off > 0:
     igSetCursorPosY(igGetCursorPosY() + off)
@@ -274,5 +282,65 @@ proc removeInside*(s: string, open, close: char): string =
     if not inside: result.add i
     if i == close: inside = false
 
-proc igGetCursorPos*(): ImVec2 = 
-  igGetCursorPosNonUDT(result.addr)
+proc igAddUnderLine*(col: uint32) = 
+  var 
+    min = igGetItemRectMin()
+    max = igGetItemRectMax()
+
+  min.y = max.y
+  igGetWindowDrawList().addLine(min, max, col, 1f)
+
+proc igTextURL*(name: string, url: string, sameLineBefore, sameLineAfter: bool = true) = 
+  let style = igGetStyle()
+  if sameLineBefore: igSameLine(0f, style.itemInnerSpacing.x)
+
+  igPushStyleColor(ImGuiCol.Text, igGetColorU32(ButtonHovered))
+  igText(name)
+  igPopStyleColor()
+
+  if igIsItemHovered():
+    if igIsMouseClicked(ImGuiMouseButton.Left):
+      url.openDefaultBrowser()
+
+    igAddUnderLine(igGetColorU32(ButtonHovered))
+    igSetTooltip(url & " " & FA_ExternalLink)
+  # else:
+  #   igAddUnderLine( igGetColorU32(ImGuiCol.Button))
+
+  if sameLineAfter: igSameLine(0f, style.itemInnerSpacing.x)
+
+proc checkFile*(path: string) = 
+  ## Iterate through `path.parentDir.parentDirs` from the root creating all the directories that do not exist.
+  ## **Example:**
+  ## ```nim
+  ## checkFile("a/b/c") # Takes c as a file, not as a directory
+  ## checkFile("a/b/c/d.png") # Only creates a/b/c directories
+  ## ```
+  for dir in path.parentDir.parentDirs(fromRoot=true):
+    discard existsOrCreateDir(dir)
+
+proc igImageFromData*(data: ImageData, size: ImVec2 = igVec2(0, 0), 
+  uv0: ImVec2 = ImVec2(x: 0, y: 0), 
+  uv1: ImVec2 = ImVec2(x: 1, y: 1), 
+  tint_col: ImVec4 = ImVec4(x: 1, y: 1, z: 1, w: 1), 
+  border_col: ImVec4 = ImVec4(x: 0, y: 0, z: 0, w: 0)
+) = 
+  var
+    texture: GLuint
+    data = data
+
+  data.loadTextureFromData(texture)
+
+  igImage(
+    cast[ptr ImTextureID](texture), 
+    if size != igVec2(0, 0): size else: igVec2(data.width.float32, data.height.float32), 
+    uv0, uv1, tint_col, border_col
+  )
+
+proc igImageFromFile*(path: string, size: ImVec2 = igVec2(0, 0), 
+  uv0: ImVec2 = ImVec2(x: 0, y: 0), 
+  uv1: ImVec2 = ImVec2(x: 1, y: 1), 
+  tint_col: ImVec4 = ImVec4(x: 1, y: 1, z: 1, w: 1), 
+  border_col: ImVec4 = ImVec4(x: 0, y: 0, z: 0, w: 0)
+) = 
+  path.readImage().igImageFromData(size, uv0, uv1, tint_col, border_col)
