@@ -104,6 +104,7 @@ const
   ]
 
 var
+  timeout = 0
   # Downloads
   downTable: Table[string, DownState] # Table[path, state]
   downThread: Thread[void] # Downloads thread
@@ -318,6 +319,103 @@ proc drawExploreApp(app: var App) =
     igEndGroup()
     igEndChild()
 
+proc drawAppsChild(app: var App, items: seq[FeedEntry]) = 
+  let
+    style = igGetStyle()
+    windowVisibleX2 = igGetWindowPos().x + igGetWindowContentRegionMax().x
+
+  if igButton(FA_List):
+    app.prefs["viewMode"] = false
+
+  igSameLine()
+
+  if igButton(FA_Th):
+    app.prefs["viewMode"] = true
+
+  if app.prefs["viewMode"].getBool(): # Grid
+    let iconSize = 64f
+    var columnsCount: int32 = if windowVisibleX2.int32 div iconSize.int32 > 64: 64 else: windowVisibleX2.int32 div iconSize.int32
+    if igBeginTable("App table", columnsCount, makeFlags(ImGuiTableFlags.ScrollY)):
+      for e, item in items:
+        # FIXME Ignore scalable icons for now
+        let icon = if item.icons.isSome and item.icons.get[0].splitFile().ext != ".svg": item.icons.get[0] else: ""
+
+        if igGetColumnIndex() >= columnsCount:
+          igTableNextRow()
+
+        igTableNextColumn()
+
+        igTextWrapped(item.name)
+
+        if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == NotDownloaded:
+          app.download(databaseURL & icon, icon)
+
+        if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == Downloaded and (let (ok, data) = app.checkImage(app.getDownload(icon)); ok):
+          igImageFromData(data, igVec2(iconSize, iconSize))
+        else:
+          igImage(nil, igVec2(iconSize, iconSize))
+
+
+        # var
+          # FIXME Ignore scalable icons for now
+
+          # icon = if item.icons.isSome and item.icons.get[0].splitFile().ext != ".svg": item.icons.get[0] else: ""
+      igEndTable()
+  else: # List
+    let iconSize = 48f
+    if igBeginChild("Apps"):
+      for e, item in items:
+        igPushId(item.name)
+
+        var desc = "No description"
+
+        if item.description.isSome:
+          desc = item.description.get.removeInside('<', '>')
+          if "\n" in desc:
+            desc = desc.split("\n")[0] & "..."
+
+          let max = (0.13 * igGetContentRegionAvail().x).int 
+          if desc.len > max:
+            desc = desc[0..<max] & "..."
+
+        let
+          descSize = desc.igCalcTextSize()
+          # FIXME Ignore scalable icons for now
+          icon = if item.icons.isSome and item.icons.get[0].splitFile().ext != ".svg": item.icons.get[0] else: ""
+
+        if igSelectable(&"##app{e}", size = igVec2(0, iconSize)):
+          app.currentApp = app.feed.get.items.find(item)
+
+        if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == NotDownloaded:
+          app.download(databaseURL & icon, icon)
+
+        igSameLine()
+
+        if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == Downloaded and (let (ok, data) = app.checkImage(app.getDownload(icon)); ok):
+          igImageFromData(data, igVec2(iconSize, iconSize))
+        else:
+          igImage(nil, igVec2(iconSize, iconSize))
+
+        igSameLine()
+
+        igBeginGroup()
+
+        app.strongFont.igPushFont()
+        igText(item.name)
+        igPopFont()
+
+        # let (p0, p1) = (igGetCurrentWindow().dc.cursorPos, igGetCurrentWindow().dc.cursorPos + descSize)
+        # drawList.pushClipRect(p0, p1, true);
+        # drawList.addText(p0, igGetColorU32(ImGuiCol.Text), desc)
+        # drawList.popClipRect()
+        igText(desc)
+
+        igEndGroup()
+
+        igPopId()
+
+      igEndChild()
+
 proc drawExploreCategory(app: var App) = 
   let
     style = igGetStyle()
@@ -326,6 +424,7 @@ proc drawExploreCategory(app: var App) =
 
   if igButton("Back " & FA_ArrowCircleLeft):
     app.currentCategory = -1
+    app.searchBuf = newString(100)
 
   igSameLine()
 
@@ -351,70 +450,22 @@ proc drawExploreCategory(app: var App) =
 
   igSpacing()
 
-  if igBeginChild("Categories List"):
-    # Filter by categories
-    var items = app.feed.get.items.filterIt(it.categories.isSome and category["xdg"] in it.categories.get)
-    # Filter by search
-    if (let search = app.searchBuf.split("\0")[0]; search.len > 0):
-      items = items.filterIt(search.toLowerAscii().strip() in it.name.toLowerAscii().strip())
-    for e, item in items:
-      igPushId(item.name)
+  # Filter by categories
+  var items = app.feed.get.items.filterIt(it.categories.isSome and category["xdg"] in it.categories.get)
+  # Filter by search
+  if (let search = app.searchBuf.split("\0")[0]; search.len > 0):
+    items = items.filterIt(search.toLowerAscii().strip() in it.name.toLowerAscii().strip())
 
-      var
-        # FIXME Ignore scalable icons for now
-        icon = if item.icons.isSome and item.icons.get[0].splitFile().ext != ".svg": item.icons.get[0] else: ""
-        desc = "No description"
-
-      if item.description.isSome:
-        desc = item.description.get.removeInside('<', '>')
-        if "\n" in desc:
-          desc = desc.split("\n")[0] & "..."
-
-        let max = (0.13 * igGetContentRegionAvail().x).int 
-        if desc.len > max:
-          desc = desc[0..<max] & "..."
-
-      let
-        descSize = desc.igCalcTextSize()
-        iconSize = 48f
-
-      if igSelectable(&"##app{e}", size = igVec2(0, iconSize)):
-        app.currentApp = app.feed.get.items.find(item)
-
-      if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == NotDownloaded:
-        app.download(databaseURL & icon, icon)
-
-      igSameLine()
-
-      if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == Downloaded and (let (ok, data) = app.checkImage(app.getDownload(icon)); ok):
-        igImageFromData(data, igVec2(iconSize, iconSize))
-      else:
-        igImage(nil, igVec2(iconSize, iconSize))
-
-      igSameLine()
-
-      igBeginGroup()
-
-      app.strongFont.igPushFont()
-      igText(item.name)
-      igPopFont()
-
-      # let (p0, p1) = (igGetCurrentWindow().dc.cursorPos, igGetCurrentWindow().dc.cursorPos + descSize)
-      # drawList.pushClipRect(p0, p1, true);
-      # drawList.addText(p0, igGetColorU32(ImGuiCol.Text), desc)
-      # drawList.popClipRect()
-      igText(desc)
-
-      igEndGroup()
-
-      igPopId()
-
-    igEndChild()
+  app.drawAppsChild(items)
 
 proc drawExploreMain(app: var App) = 
   let
     style = igGetStyle()
     windowVisibleX2 = igGetWindowPos().x + igGetWindowContentRegionMax().x
+
+  igInputTextWithHint("##search", &"Search AppImages {FA_Search}", app.searchBuf, 100)
+
+  igSpacing()
 
   for e, category in categories:
     igPushStyleColor(ImGuiCol.Button, igHSV(e / categories.len, 0.6f, 0.6f).value)
@@ -423,6 +474,7 @@ proc drawExploreMain(app: var App) =
 
     if igButton(category["en"] & " " & category["icon"]):
       app.currentCategory = e
+      app.searchBuf = newString(100)
 
     igPopStyleColor(3)
 
@@ -432,6 +484,14 @@ proc drawExploreMain(app: var App) =
     
     if e + 1 < categories.len and nextButtonX2 < windowVisibleX2:
       igSameLine()
+
+  igSpacing()
+
+  var items = app.feed.get.items
+  if (let search = app.searchBuf.split("\0")[0]; search.len > 0):
+    items = items.filterIt(search.toLowerAscii().strip() in it.name.toLowerAscii().strip())
+
+  app.drawAppsChild(items)
 
 proc drawExploreTab(app: var App) = 
   if app.currentApp > -1:
@@ -582,6 +642,7 @@ proc initPrefs(app: var App) =
     let prefsPath = getAppDir() / app.config["prefsPath"].getString()
   
   app.prefs = toPrefs({
+    viewMode: false, # false meaning list, true meaning grid
     win: {
       x: 0,
       y: 0,
@@ -660,6 +721,9 @@ proc main() =
     app.checkDownloads()
     app.display()
     app.win.swapBuffers()
+    inc timeout
+    if timeout > 1000:
+      break
 
   igOpenGL3Shutdown()
   igGlfwShutdown()

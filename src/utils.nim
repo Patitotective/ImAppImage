@@ -43,7 +43,6 @@ type
     currentApp*: int
     searchBuf*: string
 
-
 # To be able to print large holey enums
 macro enumFullRange*(a: typed): untyped =
   newNimNode(nnkBracket).add(a.getType[1][1..^1])

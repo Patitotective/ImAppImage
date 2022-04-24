@@ -5,7 +5,7 @@ author           = "Patitotective"
 description      = "ImAppImage is a simple Dear ImGui application to install and manage AppImages"
 license          = "MIT"
 namedBin["main"] = "ImAppImage"
-installFiles     = @["config.niprefs", "assets/icon.png", "assets/style.niprefs", "assets/ProggyVector Regular.ttf", "assets/forkawesome-webfont.ttf"]
+installFiles     = @["config.niprefs", "assets/icon.png", "assets/style.niprefs", "assets/Karla-Regular.ttf", "assets/Karla-Bold.ttf", "assets/forkawesome-webfont.ttf"]
 
 # Dependencies
 
