@@ -39,9 +39,12 @@ type
     statusMsg*: string
     dataThread*: Thread[void]
 
+    sort*: int32 # Sorting method: 0 means alpha-asc, 1 means alpha-desc
     currentCategory*: int
     currentApp*: int
     searchBuf*: string
+    viewLimit*: int
+    viewChange*: int
 
 # To be able to print large holey enums
 macro enumFullRange*(a: typed): untyped =
@@ -303,8 +306,6 @@ proc igTextURL*(name: string, url: string, sameLineBefore, sameLineAfter: bool =
 
     igAddUnderLine(igGetColorU32(ButtonHovered))
     igSetTooltip(url & " " & FA_ExternalLink)
-  # else:
-  #   igAddUnderLine( igGetColorU32(ImGuiCol.Button))
 
   if sameLineAfter: igSameLine(0f, style.itemInnerSpacing.x)
 
@@ -328,6 +329,7 @@ proc igImageFromData*(data: ImageData, size: ImVec2 = igVec2(0, 0),
     texture: GLuint
     data = data
 
+  if data.pixels[0].addr.isNil: echo ":["
   data.loadTextureFromData(texture)
 
   igImage(

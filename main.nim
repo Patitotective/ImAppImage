@@ -1,4 +1,4 @@
-import std/[asyncdispatch, httpclient, strutils, sequtils, strformat, browsers, options, os]
+import std/[asyncdispatch, httpclient, algorithm, strutils, sequtils, strformat, browsers, logging, options, times, os]
 
 import chroma
 import imstyle
@@ -104,6 +104,7 @@ const
   ]
 
 var
+  logger: FileLogger
   timeout = 0
   # Downloads
   downTable: Table[string, DownState] # Table[path, state]
@@ -138,10 +139,11 @@ proc getCacheDir(app: App): string =
 proc getDownload(app: App, path: string): string = 
   app.getCacheDir() / path
 
-proc cancelDownloads() = 
+proc cancelDownloads(app: App) = 
   for path, state in downTable:
     if state == Downloading and path.fileExists():
       path.removeFile()
+      logger.log(lvlDebug, "Canceling download of ", path)
 
 proc download(app: App, url, path: string, replace: bool = false) = 
   let path = app.getDownload(path)
@@ -151,7 +153,7 @@ proc download(app: App, url, path: string, replace: bool = false) =
   toDown.send((url, path))
   downTable[path] = Downloading
 
-  echo "Downloading ", url
+  logger.log(lvlInfo, "Downloading ", url, " to ", path)
 
 proc checkDownload(app: App, path: string): DownState = 
   let path = app.getDownload(path)
@@ -175,7 +177,7 @@ proc checkDownloads(app: App) =
     if msg.ok and msg.path in downTable:
       if fileExists(msg.path):
         downTable[msg.path] = Downloaded
-        echo "Downloaded ", msg.path
+        logger.log(lvlInfo, "Downloaded ", msg.path)
 
   # Check for feed.json file
   if app.feed.isNone and app.checkDownload("feed.json") == Downloaded:
@@ -189,6 +191,7 @@ proc checkImage(app: var App, path: string): tuple[ok: bool, data: ImageData] =
       app.imgTable[path] = path.readImage()
     except STBIException: # Unable to load the image
       result.ok = false
+    if app.imgTable[path].pixels[0].addr.isNil: result.ok = false
   else:
     result = (true, app.imgTable[path])
 
@@ -319,53 +322,72 @@ proc drawExploreApp(app: var App) =
     igEndGroup()
     igEndChild()
 
-proc drawAppsChild(app: var App, items: seq[FeedEntry]) = 
+proc drawAppsChild(app: var App, items: seq[FeedEntry], category: string = "") = 
   let
-    style = igGetStyle()
-    windowVisibleX2 = igGetWindowPos().x + igGetWindowContentRegionMax().x
+    # style = igGetStyle()
+    # windowVisibleX2 = igGetWindowPos().x + igGetWindowContentRegionMax().x
+    items = items.sorted(proc(x, y: FeedEntry): int = system.cmp(x.name, y.name), if app.prefs["sort"] == 0: Ascending else: Descending)
 
-  if igButton(FA_List):
-    app.prefs["viewMode"] = false
+  if category.len > 0:
+    igInputTextWithHint("##search", &"Search AppImages in {category} {FA_Search}", app.searchBuf, 100)
+  else:
+    igInputTextWithHint("##search", &"Search AppImages {FA_Search}", app.searchBuf, 100)
 
   igSameLine()
 
+  if not app.prefs["viewMode"].getBool():
+    igPushItemFlag(ImGuiItemFlags.Disabled, true)
+    igPushStyleVar(ImGuiStyleVar.Alpha, igGetStyle().alpha * 0.6)
+
+  if igButton(FA_List):
+    app.prefs["viewMode"] = false
+  elif not app.prefs["viewMode"].getBool():
+    igPopItemFlag()
+    igPopStyleVar()
+
+  igSameLine()
+
+  if app.prefs["viewMode"].getBool():
+    igPushItemFlag(ImGuiItemFlags.Disabled, true)
+    igPushStyleVar(ImGuiStyleVar.Alpha, igGetStyle().alpha * 0.6)
+
   if igButton(FA_Th):
     app.prefs["viewMode"] = true
+  elif app.prefs["viewMode"].getBool():
+    igPopItemFlag()
+    igPopStyleVar()
 
-  if app.prefs["viewMode"].getBool(): # Grid
-    let iconSize = 64f
-    var columnsCount: int32 = if windowVisibleX2.int32 div iconSize.int32 > 64: 64 else: windowVisibleX2.int32 div iconSize.int32
-    if igBeginTable("App table", columnsCount, makeFlags(ImGuiTableFlags.ScrollY)):
-      for e, item in items:
-        # FIXME Ignore scalable icons for now
-        let icon = if item.icons.isSome and item.icons.get[0].splitFile().ext != ".svg": item.icons.get[0] else: ""
+  igSameLine()
 
-        if igGetColumnIndex() >= columnsCount:
-          igTableNextRow()
+  if igButton(FA_Sort):
+    igOpenPopup("sortPopup")
 
-        igTableNextColumn()
+  if igBeginPopup("sortPopup"):
+    if igRadioButton(FA_SortAlphaAsc, app.sort.addr, 0): app.prefs["sort"] = 0
+    if igRadioButton(FA_SortAlphaDesc, app.sort.addr, 1): app.prefs["sort"] = 1
+    igEndPopup()
 
-        igTextWrapped(item.name)
+  igSpacing()
 
-        if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == NotDownloaded:
-          app.download(databaseURL & icon, icon)
-
-        if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == Downloaded and (let (ok, data) = app.checkImage(app.getDownload(icon)); ok):
-          igImageFromData(data, igVec2(iconSize, iconSize))
-        else:
-          igImage(nil, igVec2(iconSize, iconSize))
-
-
-        # var
-          # FIXME Ignore scalable icons for now
-
-          # icon = if item.icons.isSome and item.icons.get[0].splitFile().ext != ".svg": item.icons.get[0] else: ""
-      igEndTable()
+  if app.prefs["viewMode"].getBool(): # TODO Grid
+    # let iconSize = 64f
+    igText(":[")
   else: # List
     let iconSize = 48f
+    var visible = -1 # TODO add pages
     if igBeginChild("Apps"):
       for e, item in items:
-        igPushId(item.name)
+        if visible >= app.viewLimit: app.viewLimit += app.viewChange
+        if visible > 0 and visible < app.viewLimit-app.viewChange: app.viewLimit -= app.viewChange
+        if e > app.viewLimit: continue
+
+        if igSelectable(&"##app{e}", size = igVec2(0, iconSize)):
+          app.currentApp = app.feed.get.items.find(item)
+
+        if not igIsItemVisible():
+          continue
+
+        if e > visible: visible = e
 
         var desc = "No description"
 
@@ -379,19 +401,15 @@ proc drawAppsChild(app: var App, items: seq[FeedEntry]) =
             desc = desc[0..<max] & "..."
 
         let
-          descSize = desc.igCalcTextSize()
           # FIXME Ignore scalable icons for now
           icon = if item.icons.isSome and item.icons.get[0].splitFile().ext != ".svg": item.icons.get[0] else: ""
-
-        if igSelectable(&"##app{e}", size = igVec2(0, iconSize)):
-          app.currentApp = app.feed.get.items.find(item)
 
         if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == NotDownloaded:
           app.download(databaseURL & icon, icon)
 
         igSameLine()
 
-        if icon.len > 0 and igIsItemVisible() and app.checkDownload(icon) == Downloaded and (let (ok, data) = app.checkImage(app.getDownload(icon)); ok):
+        if icon.len > 0 and app.checkDownload(icon) == Downloaded and (let (ok, data) = app.checkImage(app.getDownload(icon)); ok):
           igImageFromData(data, igVec2(iconSize, iconSize))
         else:
           igImage(nil, igVec2(iconSize, iconSize))
@@ -404,23 +422,14 @@ proc drawAppsChild(app: var App, items: seq[FeedEntry]) =
         igText(item.name)
         igPopFont()
 
-        # let (p0, p1) = (igGetCurrentWindow().dc.cursorPos, igGetCurrentWindow().dc.cursorPos + descSize)
-        # drawList.pushClipRect(p0, p1, true);
-        # drawList.addText(p0, igGetColorU32(ImGuiCol.Text), desc)
-        # drawList.popClipRect()
         igText(desc)
 
         igEndGroup()
 
-        igPopId()
-
       igEndChild()
 
 proc drawExploreCategory(app: var App) = 
-  let
-    style = igGetStyle()
-    drawList = igGetWindowDrawList()
-    category = categories[app.currentCategory]
+  let category = categories[app.currentCategory]
 
   if igButton("Back " & FA_ArrowCircleLeft):
     app.currentCategory = -1
@@ -428,44 +437,18 @@ proc drawExploreCategory(app: var App) =
 
   igSameLine()
 
-  igInputTextWithHint("##search", &"Search AppImages in {category[\"en\"]} {FA_Search}", app.searchBuf, 100)
-
-  #[ 
-  drawList.channelsSplit(2)
-  drawList.channelsSetCurrent(1)
-
-  app.strongFont.igPushFont()
-  igCenterCursorX(category["en"].igCalcTextSize().x)
-  igText(category["en"])
-  igPopFont()
-
-  drawList.channelsSetCurrent(0)
-  
-  var (pMin, pMax) = (igGetItemRectMin() - 5, igGetItemRectMax() + 5) 
-  pMin.y += 25
-  drawList.addRectFilled(pMin, pMax, igHSV(app.currentCategory / categories.len, 0.6f, 0.6f).value.igGetColorU32())
-
-  drawList.channelsMerge()
-  ]#
-
-  igSpacing()
-
   # Filter by categories
   var items = app.feed.get.items.filterIt(it.categories.isSome and category["xdg"] in it.categories.get)
   # Filter by search
   if (let search = app.searchBuf.split("\0")[0]; search.len > 0):
     items = items.filterIt(search.toLowerAscii().strip() in it.name.toLowerAscii().strip())
 
-  app.drawAppsChild(items)
+  app.drawAppsChild(items, category["en"])
 
 proc drawExploreMain(app: var App) = 
   let
     style = igGetStyle()
     windowVisibleX2 = igGetWindowPos().x + igGetWindowContentRegionMax().x
-
-  igInputTextWithHint("##search", &"Search AppImages {FA_Search}", app.searchBuf, 100)
-
-  igSpacing()
 
   for e, category in categories:
     igPushStyleColor(ImGuiCol.Button, igHSV(e / categories.len, 0.6f, 0.6f).value)
@@ -533,12 +516,12 @@ proc drawMainMenuBar(app: var App) =
 
     if igBeginMenu("Edit"):
       if igMenuItem("Clear Cache"):
-        if app.getCacheDir().dirExists(): app.getCacheDir().removeDir()
+        logger.log(lvlInfo, "Clearing cache ", app.getCacheDir())
+        for kind, path in app.getCacheDir().walkDir:
+          if kind == pcDir: path.removeDir()
+          if kind == pcFile and path.splitFile.ext != ".log": path.removeFile()
+
         downTable = {app.getDownload("feed.json"): NotDownloaded}.toTable()
-        # let downTableCopy = downTable
-        # for path, state in downTableCopy:
-          # if path != app.getDownload("feed.json"):
-            # app.removeDownload(path, cachePath = false)
 
       if igMenuItem("Refresh " & FA_Refresh, "Ctrl+R"):
         app.removeDownload("feed.json")
@@ -635,13 +618,8 @@ proc initWindow(app: var App) =
   app.win.makeContextCurrent()
 
 proc initPrefs(app: var App) = 
-  when defined(appImage):
-    # Put prefsPath right next to the AppImage
-    let prefsPath = getEnv"APPIMAGE".parentDir / app.config["prefsPath"].getString()
-  else:
-    let prefsPath = getAppDir() / app.config["prefsPath"].getString()
-  
   app.prefs = toPrefs({
+    sort: 0, # 0 meaning alpha-asc, 1 meaning alpha-desc
     viewMode: false, # false meaning list, true meaning grid
     win: {
       x: 0,
@@ -649,7 +627,7 @@ proc initPrefs(app: var App) =
       width: 500,
       height: 500
     }
-  }).initPrefs(prefsPath)
+  }).initPrefs(app.getCacheDir() / app.config["prefsPath"].getString())
 
 proc initconfig(app: var App, settings: PrefsNode) = 
   # Add the preferences with the values defined in config["settings"]
@@ -661,10 +639,23 @@ proc initconfig(app: var App, settings: PrefsNode) =
       app.prefs[name] = data["default"]
 
 proc initApp(config: PObjectType): App = 
-  result = App(config: config, feed: Feed.none, currentCategory: -1, currentApp: -1, searchBuf: newString(100))
+  result = App(config: config, feed: Feed.none, currentCategory: -1, currentApp: -1, searchBuf: newString(100), viewChange: 25)
+  result.viewLimit = result.viewChange
   result.initPrefs()
   result.initConfig(result.config["settings"])
 
+  result.sort = result.prefs["sort"].getInt().int32
+
+  # Logging
+  logger = newFileLogger(
+    (result.getCacheDir() / result.config["name"].getString()).changeFileExt("log"), 
+    fmtStr = "[$time] - $levelname: ", 
+    mode = fmWrite
+  )
+
+  logger.log(lvlDebug, "Starting ", getAppFilename(), " ", getDateStr())
+
+  # Downloads
   toDown.open()
   fromDown.open()
   downThread.createThread(proc() = waitFor waitForDownloads())
@@ -673,10 +664,9 @@ proc terminate(app: var App) =
   toDown.close()
   fromDown.close()
 
-  cancelDownloads()
+  app.cancelDownloads()
 
   var x, y, width, height: int32
-
   app.win.getWindowPos(x.addr, y.addr)
   app.win.getWindowSize(width.addr, height.addr)
   
@@ -686,10 +676,9 @@ proc terminate(app: var App) =
   app.prefs["win/height"] = height
 
   app.win.destroyWindow()
+  logger.log(lvlDebug, "Terminating ", getAppFilename(), " ", getDateStr())
 
-proc main() =
-  var app = initApp(configPath.getPath().readPrefs())
-
+proc main(app: var App) =
   doAssert glfwInit()
   app.initWindow()
   doAssert glInit()
@@ -734,4 +723,9 @@ proc main() =
   glfwTerminate()
 
 when isMainModule:
-  main()
+  var app = initApp(configPath.getPath().readPrefs())
+  try:
+    app.main()
+  except:
+    logger.log(lvlFatal, getCurrentExceptionMsg())
+    raise
